@@ -3993,9 +3993,39 @@ var DEFAULT_COST_CATEGORY_MAP={
 'DESAYUNO BUFFET':[]
 };
 
+// Track deleted categories so they don't come back
+var DELETED_CATEGORIES=[];
+
+function loadDeletedCategories(){
+try{
+var saved=localStorage.getItem(CONFIG_KEY);
+if(saved){
+var config=JSON.parse(saved);
+return config.deletedCats||[];
+}
+}catch(e){}
+return[];
+}
+
+function saveDeletedCategories(){
+try{
+var saved=localStorage.getItem(CONFIG_KEY);
+var config=saved?JSON.parse(saved):{};
+config.deletedCats=DELETED_CATEGORIES;
+localStorage.setItem(CONFIG_KEY,JSON.stringify(config));
+saveToSupabase('config_data',config);
+}catch(e){}
+}
+
 // Load cost category map from config or use defaults
 function loadCostCategoryMap(){
 var result=JSON.parse(JSON.stringify(DEFAULT_COST_CATEGORY_MAP));
+var deleted=loadDeletedCategories();
+DELETED_CATEGORIES=deleted;
+// Remove deleted categories from defaults
+deleted.forEach(function(cat){
+delete result[cat];
+});
 try{
 var saved=localStorage.getItem(CONFIG_KEY);
 if(saved){
@@ -4003,7 +4033,9 @@ var config=JSON.parse(saved);
 if(config.costCatMap){
 // Merge saved with defaults - saved takes priority but new defaults get added
 for(var cat in config.costCatMap){
+if(deleted.indexOf(cat)===-1){
 result[cat]=config.costCatMap[cat];
+}
 }
 }
 }
@@ -4830,6 +4862,11 @@ var mappings=COST_CATEGORY_MAP[catName]||[];
 undoStack.push({type:'cost-cat',catName:catName,mappings:mappings.slice(),html:row?row.outerHTML:'',timestamp:Date.now()});
 if(undoStack.length>MAX_UNDO)undoStack.shift();
 updateUndoButton();
+// Track as deleted so it doesn't come back
+if(DELETED_CATEGORIES.indexOf(catName)===-1){
+DELETED_CATEGORIES.push(catName);
+saveDeletedCategories();
+}
 // Remove from COST_CATEGORY_MAP
 delete COST_CATEGORY_MAP[catName];
 saveCostCategoryMap();
