@@ -344,6 +344,7 @@ tr:hover td{background:rgba(212,160,57,.02)}
 <select id="week-select" class="week-select">
 <option value="current">SEMANA 3   LUNES  20   ENERO    2026</option>
 </select>
+<button type="button" class="btn btn-s week-btn btn-del-week" id="btn-del-week" title="Eliminar semana" style="background:transparent;border:1px solid var(--brd);padding:0.3rem 0.5rem;opacity:0.5;">🗑️</button>
 <button type="button" class="btn btn-s week-btn" id="btn-save" data-i18n="btn-save">💾 Guardar</button>
 <span id="sync-status" style="margin-left:0.5rem;font-size:0.7rem;"></span>
 <button type="button" class="btn btn-s week-btn" id="btn-new" data-i18n="btn-new">+ Nueva Semana</button>
@@ -3674,6 +3675,132 @@ var supabase=null;
 var autoSaveTimeout=null;
 var isSyncing=false;
 
+// NEW DATABASE STRUCTURE - Individual week rows
+// Tables: weeks (id, user_id, name, data, created_at, updated_at)
+//         weeks_backup (same + deleted_at for recovery)
+//         user_settings (user_id, current_week, config)
+
+// Get current user ID for data isolation
+function getCurrentUserId(){
+var session=localStorage.getItem('lacalka_session');
+if(session){try{return JSON.parse(session).email||'default';}catch(e){}}
+return 'default';
+}
+
+// Save single week to Supabase (new structure)
+function saveWeekToSupabase(weekId,weekData){
+if(!supabase)return Promise.resolve(false);
+var userId=getCurrentUserId();
+isSyncing=true;
+updateSyncStatus('syncing');
+return supabase.from('weeks').upsert({
+id:weekId,
+user_id:userId,
+name:weekData.name||weekId,
+data:weekData.data||{},
+updated_at:new Date().toISOString()
+},{onConflict:'id,user_id'}).then(function(result){
+isSyncing=false;
+if(result.error){
+console.log('Week save error:',result.error);
+updateSyncStatus('error');
+return false;
+}
+console.log('Saved week:',weekId);
+updateSyncStatus('saved');
+return true;
+}).catch(function(e){
+isSyncing=false;
+console.log('Week save error:',e);
+updateSyncStatus('error');
+return false;
+});
+}
+
+// Load all weeks for current user from Supabase
+function loadAllWeeksFromSupabase(callback){
+if(!supabase){callback(null);return;}
+var userId=getCurrentUserId();
+supabase.from('weeks').select('*').eq('user_id',userId).then(function(result){
+if(result.error){
+console.log('Weeks load error:',result.error);
+callback(null);
+}else if(result.data&&result.data.length>0){
+// Convert array to object format {weeks:{...},current:'...'}
+var weeks={};
+result.data.forEach(function(row){
+weeks[row.id]={name:row.name,data:row.data,date:row.updated_at};
+});
+console.log('Loaded '+result.data.length+' weeks from cloud');
+callback({weeks:weeks});
+}else{
+callback(null);
+}
+}).catch(function(e){
+console.log('Weeks load error:',e);
+callback(null);
+});
+}
+
+// Delete week (soft delete - moves to backup table)
+function deleteWeekFromSupabase(weekId){
+if(!supabase)return Promise.resolve(false);
+var userId=getCurrentUserId();
+// First, copy to backup table
+return supabase.from('weeks').select('*').eq('id',weekId).eq('user_id',userId).single().then(function(result){
+if(result.data){
+// Insert into backup
+return supabase.from('weeks_backup').insert({
+id:result.data.id,
+user_id:result.data.user_id,
+name:result.data.name,
+data:result.data.data,
+created_at:result.data.created_at,
+updated_at:result.data.updated_at,
+deleted_at:new Date().toISOString()
+}).then(function(){
+// Then delete from weeks
+return supabase.from('weeks').delete().eq('id',weekId).eq('user_id',userId);
+});
+}
+return Promise.resolve({error:'Week not found'});
+}).then(function(result){
+if(result.error){
+console.log('Week delete error:',result.error);
+return false;
+}
+console.log('Week deleted (backed up):',weekId);
+return true;
+}).catch(function(e){
+console.log('Week delete error:',e);
+return false;
+});
+}
+
+// Save user settings (current week, etc)
+function saveUserSettings(settings){
+if(!supabase)return;
+var userId=getCurrentUserId();
+supabase.from('user_settings').upsert({
+user_id:userId,
+current_week:settings.current||'default',
+config:settings.config||{},
+updated_at:new Date().toISOString()
+},{onConflict:'user_id'}).then(function(result){
+if(result.error)console.log('Settings save error:',result.error);
+});
+}
+
+// Load user settings
+function loadUserSettings(callback){
+if(!supabase){callback(null);return;}
+var userId=getCurrentUserId();
+supabase.from('user_settings').select('*').eq('user_id',userId).single().then(function(result){
+if(result.error||!result.data){callback(null);}
+else{callback(result.data);}
+}).catch(function(){callback(null);});
+}
+
 // Undo stack for deleted items
 var undoStack=[];
 var MAX_UNDO=50;
@@ -5174,8 +5301,13 @@ catch(e){return{weeks:{},current:'default'};}
 function setStorage(data){
 try{
 localStorage.setItem(STORAGE_KEY,JSON.stringify(data));
-// Also save to Supabase (async, non-blocking)
-saveToSupabase('weeks_data',data);
+// Save current week to Supabase (new per-week structure)
+var currentWeekId=data.current||'default';
+if(data.weeks&&data.weeks[currentWeekId]){
+saveWeekToSupabase(currentWeekId,data.weeks[currentWeekId]);
+}
+// Save user settings (current week selection)
+saveUserSettings({current:currentWeekId});
 return true;
 }catch(e){return false;}
 }
@@ -5654,8 +5786,16 @@ var sunMonth=months[sunday.getMonth()];
 var satDay=saturday.getDate();
 var satMonth=months[saturday.getMonth()];
 
-// Create week name with range (e.g., "SEMANA 5 - 26 ENERO al 1 FEBRERO 2026")
-var weekName='SEMANA '+weekNum+' - '+sunDay+' '+sunMonth+' al '+satDay+' '+satMonth+' '+year;
+// Create week name (e.g., "SEMANA 5 ENERO 26-1 2026" or "SEMANA 5 ENERO 19-25 2026")
+var weekName;
+if(sunMonth===satMonth){
+// Same month: "SEMANA 5 ENERO 19-25 2026"
+weekName='SEMANA '+weekNum+' '+sunMonth+' '+sunDay+'-'+satDay+' '+year;
+}else{
+// Different months: "SEMANA 5 ENE 26 - FEB 1 2026"
+var monthsShort=['ENE','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT','NOV','DIC'];
+weekName='SEMANA '+weekNum+' '+monthsShort[sunday.getMonth()]+' '+sunDay+'-'+monthsShort[saturday.getMonth()]+' '+satDay+' '+year;
+}
 var weekId='week_'+weekNum+'_'+year;
 
 var storage=getStorage();
@@ -5789,6 +5929,48 @@ if(storage.weeks[weekId]&&storage.weeks[weekId].data){
 loadData(storage.weeks[weekId].data);
 storage.current=weekId;
 setStorage(storage);
+}
+// Update delete button state
+var delBtn=document.getElementById('btn-del-week');
+if(weekId==='default'){
+delBtn.style.opacity='0.3';
+delBtn.style.cursor='not-allowed';
+}else{
+delBtn.style.opacity='0.7';
+delBtn.style.cursor='pointer';
+}
+});
+
+// Delete week button
+document.getElementById('btn-del-week').addEventListener('click',function(){
+var sel=document.getElementById('week-select');
+var weekId=sel.value;
+if(weekId==='default'){
+alert(currentLang==='es'?'No se puede eliminar la semana predeterminada.':'Cannot delete the default week.');
+return;
+}
+var weekName=sel.options[sel.selectedIndex].textContent;
+var msg=currentLang==='es'
+?'¿Eliminar "'+weekName+'"?\n\nSe guardará una copia de respaldo en Supabase.'
+:'Delete "'+weekName+'"?\n\nA backup copy will be saved to Supabase.';
+if(confirm(msg)){
+var storage=getStorage();
+// Delete from Supabase (moves to backup table)
+deleteWeekFromSupabase(weekId);
+// Delete from local storage
+delete storage.weeks[weekId];
+storage.current='default';
+localStorage.setItem(STORAGE_KEY,JSON.stringify(storage));
+saveUserSettings({current:'default'});
+updateWeekSelect();
+sel.value='default';
+if(storage.weeks['default']&&storage.weeks['default'].data){
+loadData(storage.weeks['default'].data);
+}else{
+location.reload();
+}
+document.getElementById('btn-del-week').style.opacity='0.3';
+alert(currentLang==='es'?'Semana eliminada (respaldo guardado).':'Week deleted (backup saved).');
 }
 });
 
@@ -6039,22 +6221,49 @@ localStorage.setItem(CONFIG_KEY,JSON.stringify(cloudConfig));
 }
 });
 
-loadFromSupabase('weeks_data',function(cloudData){
+// Load weeks from new per-row structure
+loadAllWeeksFromSupabase(function(cloudData){
 if(cloudData&&cloudData.weeks){
 var localData=getStorage();
-// Use cloud data if it has more weeks or is newer
-var cloudWeekCount=Object.keys(cloudData.weeks).length;
-var localWeekCount=Object.keys(localData.weeks).length;
-if(cloudWeekCount>=localWeekCount){
-localStorage.setItem(STORAGE_KEY,JSON.stringify(cloudData));
+// Merge cloud weeks with local - cloud takes priority
+var merged={weeks:{},current:localData.current||'default'};
+// Add local weeks first
+for(var id in localData.weeks){
+merged.weeks[id]=localData.weeks[id];
+}
+// Override/add cloud weeks
+for(var id in cloudData.weeks){
+merged.weeks[id]=cloudData.weeks[id];
+}
+localStorage.setItem(STORAGE_KEY,JSON.stringify(merged));
 updateWeekSelect();
-if(cloudData.current&&cloudData.weeks[cloudData.current]){
-document.getElementById('week-select').value=cloudData.current;
-loadData(cloudData.weeks[cloudData.current].data);
+console.log('Loaded '+Object.keys(cloudData.weeks).length+' weeks from cloud (new structure)');
+}
+// Load user settings for current week
+loadUserSettings(function(settings){
+if(settings&&settings.current_week){
+var storage=getStorage();
+if(storage.weeks[settings.current_week]){
+storage.current=settings.current_week;
+localStorage.setItem(STORAGE_KEY,JSON.stringify(storage));
+document.getElementById('week-select').value=settings.current_week;
+loadData(storage.weeks[settings.current_week].data);
+}
 }
 updateRunningTotals();
-console.log('Loaded '+cloudWeekCount+' weeks from cloud');
+});
+});
+// Also try legacy format for migration
+loadFromSupabase('weeks_data',function(legacyData){
+if(legacyData&&legacyData.weeks&&Object.keys(legacyData.weeks).length>0){
+console.log('Found legacy weeks_data - migrating to new structure...');
+// Migrate each week to new structure
+for(var weekId in legacyData.weeks){
+if(legacyData.weeks.hasOwnProperty(weekId)){
+saveWeekToSupabase(weekId,legacyData.weeks[weekId]);
 }
+}
+console.log('Migration complete - weeks saved individually');
 }
 });
 
