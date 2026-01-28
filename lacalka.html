@@ -5395,15 +5395,58 @@ var sel=document.getElementById('week-select');
 var curr=sel.value;
 var first=sel.options[0].textContent;
 sel.innerHTML='<option value="default">'+first+'</option>';
-Object.keys(storage.weeks).sort().reverse().forEach(function(id){
-if(id!=='default'){
+// Sort weeks by week number (extract from id: week_NUM_timestamp or weekNUM_timestamp)
+var weekIds=Object.keys(storage.weeks).filter(function(id){return id!=='default';});
+weekIds.sort(function(a,b){
+var numA=parseInt((a.match(/week_?(\d+)/i)||[0,0])[1])||0;
+var numB=parseInt((b.match(/week_?(\d+)/i)||[0,0])[1])||0;
+return numA-numB; // Sort ascending (lowest week first)
+});
+weekIds.forEach(function(id){
 var opt=document.createElement('option');
 opt.value=id;
 opt.textContent=storage.weeks[id].name||id;
 sel.appendChild(opt);
-}
 });
 if(storage.weeks[curr])sel.value=curr;
+}
+
+// Get week number and year from a date
+function getWeekInfo(date){
+var d=new Date(date);
+var startOfYear=new Date(d.getFullYear(),0,1);
+var weekNum=Math.ceil(((d-startOfYear)/86400000+startOfYear.getDay()+1)/7);
+return{week:weekNum,year:d.getFullYear()};
+}
+
+// Check if week already exists
+function weekExists(weekNum,year){
+var storage=getStorage();
+for(var id in storage.weeks){
+if(id==='default')continue;
+var name=storage.weeks[id].name||'';
+// Check if name contains "SEMANA X" and year
+var match=name.match(/SEMANA\s+(\d+).*(\d{4})/i);
+if(match){
+var existingWeek=parseInt(match[1]);
+var existingYear=parseInt(match[2]);
+if(existingWeek===weekNum&&existingYear===year){
+return{exists:true,id:id,name:name};
+}
+}
+}
+return{exists:false};
+}
+
+// Get Sunday-Saturday range for a given date
+function getWeekRange(date){
+var d=new Date(date);
+var day=d.getDay();
+var sunday=new Date(d);
+sunday.setDate(d.getDate()-day);
+var saturday=new Date(sunday);
+saturday.setDate(sunday.getDate()+6);
+return{sunday:sunday,saturday:saturday};
 }
 
 document.getElementById('btn-save').addEventListener('click',function(){
@@ -5456,24 +5499,165 @@ if(document.body.contains(input))document.body.removeChild(input);
 });
 }
 
-// Nueva Semana with calendar picker - auto-calculates week number from date
+// Week picker - shows calendar and displays Sunday-Saturday range
+function showWeekPicker(buttonElement,callback){
+var rect=buttonElement.getBoundingClientRect();
+var months=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+var monthsShort=['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+
+// Create picker container
+var picker=document.createElement('div');
+picker.style.cssText='position:fixed;top:'+(rect.bottom+8)+'px;left:'+rect.left+'px;background:#2d2d2d;border:2px solid #d4a039;border-radius:12px;padding:16px;z-index:10000;box-shadow:0 10px 40px rgba(0,0,0,0.5);font-family:inherit;min-width:300px;';
+
+var today=new Date();
+var currentMonth=today.getMonth();
+var currentYear=today.getFullYear();
+
+function renderPicker(){
+var firstDay=new Date(currentYear,currentMonth,1);
+var lastDay=new Date(currentYear,currentMonth+1,0);
+var startDay=firstDay.getDay();
+
+var html='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">';
+html+='<button type="button" style="background:none;border:none;color:#d4a039;font-size:20px;cursor:pointer;padding:4px 8px;" id="wp-prev">◀</button>';
+html+='<span style="color:#fff;font-weight:600;font-size:14px;">'+months[currentMonth]+' '+currentYear+'</span>';
+html+='<button type="button" style="background:none;border:none;color:#d4a039;font-size:20px;cursor:pointer;padding:4px 8px;" id="wp-next">▶</button>';
+html+='</div>';
+
+html+='<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;text-align:center;margin-bottom:8px;">';
+['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'].forEach(function(d){
+html+='<div style="color:#888;font-size:10px;padding:4px;">'+d+'</div>';
+});
+html+='</div>';
+
+html+='<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;text-align:center;">';
+for(var i=0;i<startDay;i++){
+html+='<div></div>';
+}
+for(var day=1;day<=lastDay.getDate();day++){
+var dateObj=new Date(currentYear,currentMonth,day);
+var isToday=dateObj.toDateString()===today.toDateString();
+var style='padding:8px 4px;cursor:pointer;border-radius:4px;font-size:12px;color:#fff;';
+if(isToday)style+='background:#d4a039;color:#000;font-weight:600;';
+html+='<div class="wp-day" data-date="'+currentYear+'-'+(currentMonth+1)+'-'+day+'" style="'+style+'">'+day+'</div>';
+}
+html+='</div>';
+
+html+='<div id="wp-selection" style="margin-top:12px;padding:10px;background:#1e1e1e;border-radius:8px;display:none;">';
+html+='<div style="color:#888;font-size:11px;margin-bottom:4px;">Semana seleccionada:</div>';
+html+='<div id="wp-range" style="color:#d4a039;font-weight:600;font-size:13px;"></div>';
+html+='</div>';
+
+html+='<div style="display:flex;gap:8px;margin-top:12px;">';
+html+='<button type="button" id="wp-cancel" style="flex:1;padding:10px;background:#444;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;">'+(currentLang==='es'?'Cancelar':'Cancel')+'</button>';
+html+='<button type="button" id="wp-confirm" style="flex:1;padding:10px;background:#d4a039;border:none;border-radius:6px;color:#000;cursor:pointer;font-weight:600;font-size:13px;display:none;">'+(currentLang==='es'?'Crear Semana':'Create Week')+'</button>';
+html+='</div>';
+
+picker.innerHTML=html;
+}
+
+renderPicker();
+document.body.appendChild(picker);
+
+var selectedWeek=null;
+
+picker.addEventListener('click',function(e){
+if(e.target.id==='wp-prev'){
+currentMonth--;
+if(currentMonth<0){currentMonth=11;currentYear--;}
+renderPicker();
+}else if(e.target.id==='wp-next'){
+currentMonth++;
+if(currentMonth>11){currentMonth=0;currentYear++;}
+renderPicker();
+}else if(e.target.classList.contains('wp-day')){
+var dateStr=e.target.dataset.date;
+var parts=dateStr.split('-');
+var clickedDate=new Date(parts[0],parts[1]-1,parts[2]);
+
+// Calculate Sunday-Saturday range
+var day=clickedDate.getDay();
+var sunday=new Date(clickedDate);
+sunday.setDate(clickedDate.getDate()-day);
+var saturday=new Date(sunday);
+saturday.setDate(sunday.getDate()+6);
+
+// Calculate week number
+var startOfYear=new Date(sunday.getFullYear(),0,1);
+var weekNum=Math.ceil(((sunday-startOfYear)/86400000+startOfYear.getDay()+1)/7);
+
+// Highlight selected week
+picker.querySelectorAll('.wp-day').forEach(function(d){
+d.style.background='';d.style.color='#fff';
+});
+picker.querySelectorAll('.wp-day').forEach(function(d){
+var dParts=d.dataset.date.split('-');
+var dDate=new Date(dParts[0],dParts[1]-1,dParts[2]);
+if(dDate>=sunday&&dDate<=saturday){
+d.style.background='rgba(212,160,57,0.3)';d.style.color='#d4a039';
+}
+});
+
+// Show selection
+var sunStr=sunday.getDate()+' '+monthsShort[sunday.getMonth()];
+var satStr=saturday.getDate()+' '+monthsShort[saturday.getMonth()]+' '+saturday.getFullYear();
+document.getElementById('wp-range').textContent='Semana '+weekNum+': '+sunStr+' - '+satStr;
+document.getElementById('wp-selection').style.display='block';
+document.getElementById('wp-confirm').style.display='block';
+
+selectedWeek={weekNum:weekNum,year:sunday.getFullYear(),sunday:sunday,saturday:saturday};
+}else if(e.target.id==='wp-cancel'){
+document.body.removeChild(picker);
+}else if(e.target.id==='wp-confirm'&&selectedWeek){
+document.body.removeChild(picker);
+callback(selectedWeek);
+}
+});
+
+// Close on outside click
+setTimeout(function(){
+document.addEventListener('click',function closePickerOnOutside(ev){
+if(!picker.contains(ev.target)&&ev.target!==buttonElement){
+if(document.body.contains(picker))document.body.removeChild(picker);
+document.removeEventListener('click',closePickerOnOutside);
+}
+});
+},100);
+}
+
+// Nueva Semana with week picker - shows Sunday-Saturday range
 document.getElementById('btn-new').addEventListener('click',function(){
 var btn=this;
-showDatePicker(btn,function(dateStr){
-// Calculate week number from date
-var d=new Date(dateStr);
-var startOfYear=new Date(d.getFullYear(),0,1);
-var weekNum=Math.ceil(((d-startOfYear)/86400000+startOfYear.getDay()+1)/7);
-// Convert to Spanish format
-var days=['DOMINGO','LUNES','MARTES','MIÉRCOLES','JUEVES','VIERNES','SÁBADO'];
+showWeekPicker(btn,function(weekInfo){
+var weekNum=weekInfo.weekNum;
+var year=weekInfo.year;
+var sunday=weekInfo.sunday;
+var saturday=weekInfo.saturday;
+
+// Check if this week already exists
+var existing=weekExists(weekNum,year);
+if(existing.exists){
+var msg=currentLang==='es'
+?'La Semana '+weekNum+' del '+year+' ya existe.\n\n¿Desea ir a esa semana?'
+:'Week '+weekNum+' of '+year+' already exists.\n\nDo you want to go to that week?';
+if(confirm(msg)){
+document.getElementById('week-select').value=existing.id;
+document.getElementById('week-select').dispatchEvent(new Event('change'));
+}
+return;
+}
+
+// Format dates for display
 var months=['ENERO','FEBRERO','MARZO','ABRIL','MAYO','JUNIO','JULIO','AGOSTO','SEPTIEMBRE','OCTUBRE','NOVIEMBRE','DICIEMBRE'];
-var dayName=days[d.getDay()];
-var dayNum=d.getDate();
-var monthName=months[d.getMonth()];
-var year=d.getFullYear();
-var startDate=dayName+' '+dayNum+' '+monthName+' '+year;
-var weekId='week_'+weekNum+'_'+Date.now();
-var weekName='SEMANA '+weekNum+' '+startDate;
+var sunDay=sunday.getDate();
+var sunMonth=months[sunday.getMonth()];
+var satDay=saturday.getDate();
+var satMonth=months[saturday.getMonth()];
+
+// Create week name with range (e.g., "SEMANA 5 - 26 ENERO al 1 FEBRERO 2026")
+var weekName='SEMANA '+weekNum+' - '+sunDay+' '+sunMonth+' al '+satDay+' '+satMonth+' '+year;
+var weekId='week_'+weekNum+'_'+year;
+
 var storage=getStorage();
 storage.weeks[weekId]={name:weekName,date:new Date().toISOString(),data:{}};
 storage.current=weekId;
