@@ -1,0 +1,14 @@
+- generic [ref=e3]:
+  - heading "🔐 Iniciar Sesión" [level=2] [ref=e4]:
+    - generic [ref=e5]: 🔐
+    - text: Iniciar Sesión
+  - generic [ref=e6]:
+    - generic [ref=e7]:
+      - generic [ref=e8]: Usuario
+      - textbox "saul@lacalka.net" [ref=e9]
+    - generic [ref=e10]:
+      - generic [ref=e11]: Contraseña
+      - textbox "••••••••" [active] [ref=e12]
+    - button "Ingresar" [ref=e13] [cursor=pointer]:
+      - generic [ref=e14]: Ingresar
+  - paragraph [ref=e15]: La Calka • Sistema de Gestión de Gastos
